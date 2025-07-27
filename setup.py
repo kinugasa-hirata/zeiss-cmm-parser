@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="cmm-measurement-parser",
-    version="1.0.0",
+    version="1.1.0",
     author="shuhei",
     author_email="kinugasa.hirata@gmail.com",
     description="Professional CMM measurement data parser for coordinate measuring machines",
