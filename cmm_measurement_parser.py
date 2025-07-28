@@ -11,6 +11,7 @@ Features:
 - Export to Excel with proper Japanese character encoding
 - Summary statistics by measurement element
 - Professional quality control reporting
+- Filtered XY coordinate extraction with numerical sorting
 
 Author: shuhei
 License: MIT
@@ -36,7 +37,7 @@ class CMMParser:
     
     def __init__(self):
         """Initialize the CMM Parser"""
-        self.version = "1.0.0"
+        self.version = "1.2.0"  # Updated version
         
         # Column translation mapping
         self.column_translation = {
@@ -61,28 +62,31 @@ class CMMParser:
             'form_error': '形状誤差',
             'histogram': 'ヒストグラム',
             'tolerance_range': '許容範囲',
-            'tolerance_utilization': '許容差使用率'
+            'tolerance_utilization': '許容差使用率',
+            'value': '値'
         }
         
-    def parse_lines_to_dataframe(self, lines: List[str], use_japanese_columns: bool = True) -> pd.DataFrame:
+    def parse_lines_to_dataframe(self, lines: List[str], use_japanese_columns: bool = True, verbose: bool = False) -> pd.DataFrame:
         """
         Parse CMM measurement lines into a structured DataFrame using improved parsing logic.
         
         Args:
             lines: List of strings from CMM measurement data
             use_japanese_columns: Whether to use Japanese column names (default: True)
+            verbose: Whether to print progress messages (default: False)
         
         Returns:
             pandas.DataFrame: Structured measurement data with Japanese column names
         
         Example:
             >>> lines = text.split('\\n')  # Your CMM report text
-            >>> df = parser.parse_lines_to_dataframe(lines)
+            >>> df = parser.parse_lines_to_dataframe(lines, verbose=True)
             >>> print(f"Parsed {len(df)} measurements")
         """
         
-        print("🔧 Parsing CMM measurement data...")
-        print("=" * 60)
+        if verbose:
+            print("🔧 Parsing CMM measurement data...")
+            print("=" * 60)
         
         # Step 1: Split into datasets using horizontal separators
         datasets = []
@@ -112,7 +116,8 @@ class CMMParser:
         if current_dataset:
             datasets.append(current_dataset)
         
-        print(f"📊 Found {len(datasets)} datasets")
+        if verbose:
+            print(f"📊 Found {len(datasets)} datasets")
         
         # Step 2: Process each dataset with improved patterns
         measurement_records = []
@@ -194,9 +199,10 @@ class CMMParser:
                         measurement_records.append(record)
                         continue
         
-        print(f"\n📊 EXTRACTION SUMMARY:")
-        print(f"✅ Total datasets processed: {len(datasets)}")
-        print(f"✅ Total measurement records: {len(measurement_records)}")
+        if verbose:
+            print(f"\n📊 EXTRACTION SUMMARY:")
+            print(f"✅ Total datasets processed: {len(datasets)}")
+            print(f"✅ Total measurement records: {len(measurement_records)}")
         
         if measurement_records:
             df = pd.DataFrame(measurement_records)
@@ -241,18 +247,223 @@ class CMMParser:
             available_columns = [col for col in japanese_column_order if col in df.columns]
             df = df[available_columns]
             
-            print(f"✅ DataFrame created with {len(df)} records and Japanese column names!")
+            if verbose:
+                print(f"✅ DataFrame created with {len(df)} records and Japanese column names!")
             return df
         else:
-            print("❌ No measurement records found")
+            if verbose:
+                print("❌ No measurement records found")
+            return pd.DataFrame()
+
+    def parse_xy_coordinates(self, lines: List[str], use_japanese_columns: bool = True, verbose: bool = False) -> pd.DataFrame:
+        """
+        NEW: Parse only X,Y coordinates from specific element types with numerical sorting.
+        
+        Extracts only exact "円" + numbers and "ｄ-" + numbers elements,
+        creating a clean dataset with two rows per element (X and Y coordinates).
+        
+        Args:
+            lines: List of strings from CMM measurement data
+            use_japanese_columns: Whether to use Japanese column names (default: True)
+            verbose: Whether to print progress messages (default: False)
+        
+        Returns:
+            pandas.DataFrame: Clean XY coordinate data with numerical sorting
+        
+        Example:
+            >>> parser = CMMParser()
+            >>> df = parser.parse_xy_coordinates(lines, verbose=True)
+            >>> print(f"Extracted {len(df)} coordinate records")
+        """
+        
+        if verbose:
+            print("🔧 Filtered XY Parser - Continuous stream processing...")
+            print("=" * 60)
+
+        # Step 1: Clean the lines by removing headers
+        clean_lines = []
+        header_pattern = r'(CARL ZEISS|CALYPSO|測定ﾌﾟﾗﾝ|ACCURA|名前|説明|実測値|基準値|上許容差|下許容誤差|ﾋｽﾄｸﾞﾗﾑ|ｺﾝﾊﾟｸﾄﾌﾟﾘﾝﾄｱｳﾄ|ｵﾍﾟﾚｰﾀ|日付|ﾊﾟｰﾄNo|Master|2025年|20190821|支持板)'
+        separator_pattern = r'^[=_-]{10,}$'
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Skip all header/separator lines
+            if re.search(header_pattern, line) or re.search(separator_pattern, line):
+                if verbose:
+                    print(f"   Skipping header: {line[:50]}...")
+                continue
+            clean_lines.append(line)
+
+        if verbose:
+            print(f"📊 Cleaned document: {len(clean_lines)} useful lines")
+
+        # Step 2: Process all clean lines sequentially
+        xy_records = []
+        current_element = None
+        looking_for_x = False
+        looking_for_y = False
+        current_x = None
+
+        for line_idx, line in enumerate(clean_lines):
+            
+            # Look for element patterns
+            element_pattern = r'^([^\s]+)\s+(円\(最小二乗法\)|平面\(最小二乗法\)|直線\(最小二乗法\)|基本座標系|3次元直線|点|2D距離)'
+            element_match = re.search(element_pattern, line)
+            
+            if element_match:
+                candidate_tag = element_match.group(1)
+                
+                if verbose:
+                    print(f"   Line {line_idx}: Found candidate element '{candidate_tag}'")
+                
+                # FILTER: Only EXACT matches for "円" + numbers OR "ｄ-" + numbers
+                circle_pattern = r'^円\d+$'
+                d_pattern = r'^ｄ-\d+$'
+                
+                if re.search(circle_pattern, candidate_tag) or re.search(d_pattern, candidate_tag):
+                    # Save previous record if incomplete
+                    if current_element and current_x is not None and looking_for_y:
+                        if verbose:
+                            print(f"   ⚠️  Previous element {current_element} incomplete (missing Y)")
+                    
+                    # Start tracking new element
+                    current_element = candidate_tag
+                    looking_for_x = True
+                    looking_for_y = False
+                    current_x = None
+                    
+                    if verbose:
+                        tag_type = "円グループ" if "円" in candidate_tag else "ｄ-グループ"
+                        print(f"   ✅ ACCEPTED element: {current_element} ({tag_type})")
+                else:
+                    if verbose:
+                        print(f"   ❌ REJECTED element: {candidate_tag} (doesn't match filter)")
+                continue
+
+            # Look for X coordinate
+            if current_element and looking_for_x:
+                x_pattern = r'\bX\s+([-\d.]+)'
+                x_match = re.search(x_pattern, line)
+                if x_match:
+                    current_x = abs(float(x_match.group(1)))
+                    looking_for_x = False
+                    looking_for_y = True
+                    if verbose:
+                        print(f"   ✅ Found X for {current_element}: {current_x}")
+                    continue
+
+            # Look for Y coordinate
+            if current_element and current_x is not None and looking_for_y:
+                y_pattern = r'\bY\s+([-\d.]+)'
+                y_match = re.search(y_pattern, line)
+                if y_match:
+                    current_y = abs(float(y_match.group(1)))
+                    
+                    # Save complete record
+                    record = {
+                        'element_name': current_element,
+                        'x_coordinate': current_x,
+                        'y_coordinate': current_y
+                    }
+                    xy_records.append(record)
+                    
+                    if verbose:
+                        print(f"   ✅ COMPLETE: {current_element} X={current_x} Y={current_y}")
+                    
+                    # Reset for next element
+                    current_element = None
+                    looking_for_x = False
+                    looking_for_y = False
+                    current_x = None
+                    continue
+
+        if verbose:
+            print(f"\n📊 FILTERED XY EXTRACTION SUMMARY:")
+            print(f"✅ Total clean lines processed: {len(clean_lines)}")
+            print(f"✅ Total filtered XY records: {len(xy_records)}")
+
+        if xy_records:
+            # Separate into groups
+            circle_elements = [r for r in xy_records if "円" in r['element_name']]
+            d_elements = [r for r in xy_records if "ｄ-" in r['element_name']]
+            
+            if verbose:
+                print(f"\n📊 Groups found:")
+                print(f"   円グループ: {len(circle_elements)} elements")
+                print(f"   ｄ-グループ: {len(d_elements)} elements")
+
+            # NUMERICAL SORTING FUNCTION
+            def extract_number(element_name):
+                if "円" in element_name:
+                    match = re.search(r'円(\d+)', element_name)
+                    return int(match.group(1)) if match else 0
+                elif "ｄ-" in element_name:
+                    match = re.search(r'ｄ-(\d+)', element_name)
+                    return int(match.group(1)) if match else 0
+                return 0
+
+            # Create reshaped data with numerical sorting
+            reshaped_data = []
+            
+            # Add 円 group elements (sorted numerically)
+            circle_elements_sorted = sorted(circle_elements, key=lambda x: extract_number(x['element_name']))
+            for element_record in circle_elements_sorted:
+                # Add X row
+                reshaped_data.append({
+                    'element_name': element_record['element_name'],
+                    'coordinate_type': 'X',
+                    'value': element_record['x_coordinate']
+                })
+                # Add Y row
+                reshaped_data.append({
+                    'element_name': element_record['element_name'],
+                    'coordinate_type': 'Y',
+                    'value': element_record['y_coordinate']
+                })
+            
+            # Add ｄ- group elements (sorted numerically)
+            d_elements_sorted = sorted(d_elements, key=lambda x: extract_number(x['element_name']))
+            for element_record in d_elements_sorted:
+                # Add X row
+                reshaped_data.append({
+                    'element_name': element_record['element_name'],
+                    'coordinate_type': 'X',
+                    'value': element_record['x_coordinate']
+                })
+                # Add Y row
+                reshaped_data.append({
+                    'element_name': element_record['element_name'],
+                    'coordinate_type': 'Y',
+                    'value': element_record['y_coordinate']
+                })
+            
+            df = pd.DataFrame(reshaped_data)
+            
+            # Convert column names if Japanese requested
+            if use_japanese_columns:
+                df = df.rename(columns=self.column_translation)
+
+            if verbose:
+                print(f"✅ Reshaped DataFrame created!")
+                print(f"📐 Shape: {df.shape[0]} rows × {df.shape[1]} columns")
+                print(f"📍 Sample data:")
+                print(df.head(10))
+                
+            return df
+        else:
+            if verbose:
+                print("❌ No filtered XY coordinate records found")
             return pd.DataFrame()
     
-    def create_summary_by_element(self, df: pd.DataFrame) -> pd.DataFrame:
+    def create_summary_by_element(self, df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
         """
         Create summary statistics grouped by measurement element.
         
         Args:
             df: Structured CMM DataFrame from parse_lines_to_dataframe()
+            verbose: Whether to print progress messages (default: False)
             
         Returns:
             pd.DataFrame: Summary statistics including pass rates and averages
@@ -297,13 +508,14 @@ class CMMParser:
         return summary.reset_index()
 
 
-def parse_cmm_data(lines: List[str], use_japanese_columns: bool = True) -> pd.DataFrame:
+def parse_cmm_data(lines: List[str], use_japanese_columns: bool = True, verbose: bool = False) -> pd.DataFrame:
     """
     Quick function to parse CMM measurement lines to DataFrame.
     
     Args:
         lines: List of strings from CMM measurement data
         use_japanese_columns: Whether to use Japanese column names
+        verbose: Whether to print progress messages (default: False)
         
     Returns:
         pandas.DataFrame: Structured measurement data
@@ -311,59 +523,89 @@ def parse_cmm_data(lines: List[str], use_japanese_columns: bool = True) -> pd.Da
     Example:
         >>> import cmm_measurement_parser as cmp
         >>> lines = text.split('\\n')
-        >>> df = cmp.parse_cmm_data(lines)
+        >>> df = cmp.parse_cmm_data(lines)  # Silent mode
+        >>> df = cmp.parse_cmm_data(lines, verbose=True)  # With output
     """
     parser = CMMParser()
-    return parser.parse_lines_to_dataframe(lines, use_japanese_columns)
+    return parser.parse_lines_to_dataframe(lines, use_japanese_columns, verbose)
 
 
-def process_cmm_data(lines: List[str], use_japanese_columns: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def parse_xy_coordinates(lines: List[str], use_japanese_columns: bool = True, verbose: bool = False) -> pd.DataFrame:
+    """
+    NEW: Quick function to parse only X,Y coordinates from specific elements.
+    
+    Extracts only exact "円" + numbers and "ｄ-" + numbers elements,
+    creating a clean dataset with numerical sorting.
+    
+    Args:
+        lines: List of strings from CMM measurement data
+        use_japanese_columns: Whether to use Japanese column names (default: True)
+        verbose: Whether to print progress messages (default: False)
+        
+    Returns:
+        pandas.DataFrame: Clean XY coordinate data
+        
+    Example:
+        >>> import cmm_measurement_parser as cmp
+        >>> df = cmp.parse_xy_coordinates(lines)  # Silent mode
+        >>> df = cmp.parse_xy_coordinates(lines, verbose=True)  # With output
+    """
+    parser = CMMParser()
+    return parser.parse_xy_coordinates(lines, use_japanese_columns, verbose)
+
+
+def process_cmm_data(lines: List[str], use_japanese_columns: bool = True, verbose: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Complete CMM data processing pipeline.
     
     Args:
         lines: List of strings from CMM measurement data
         use_japanese_columns: Whether to use Japanese column names
+        verbose: Whether to print progress messages (default: False)
         
     Returns:
         Tuple of (detailed_df, summary_df)
         
     Example:
-        >>> df, summary = process_cmm_data(lines)
+        >>> df, summary = process_cmm_data(lines)  # Silent mode
+        >>> df, summary = process_cmm_data(lines, verbose=True)  # With output
         >>> print(f"Processed {len(df)} measurements from {len(summary)} elements")
     """
     parser = CMMParser()
-    df = parser.parse_lines_to_dataframe(lines, use_japanese_columns)
+    df = parser.parse_lines_to_dataframe(lines, use_japanese_columns, verbose)
     
     if len(df) == 0:
-        print("❌ No data parsed successfully")
+        if verbose:
+            print("❌ No data parsed successfully")
         return pd.DataFrame(), pd.DataFrame()
     
-    summary_df = parser.create_summary_by_element(df)
+    summary_df = parser.create_summary_by_element(df, verbose)
     
-    # Show statistics
-    status_col = 'ステータス' if use_japanese_columns else 'status'
-    element_col = '要素名' if use_japanese_columns else 'element_name'
-    
-    pass_count = len(df[df[status_col] == 'PASS'])
-    total_count = len(df)
-    pass_rate = (pass_count / total_count * 100) if total_count > 0 else 0
-    
-    print(f"📊 Processing Complete:")
-    print(f"   📏 {total_count} measurements")
-    print(f"   🔧 {df[element_col].nunique()} elements")
-    print(f"   ✅ {pass_rate:.1f}% pass rate")
+    if verbose:
+        # Show statistics
+        status_col = 'ステータス' if use_japanese_columns else 'status'
+        element_col = '要素名' if use_japanese_columns else 'element_name'
+        
+        pass_count = len(df[df[status_col] == 'PASS'])
+        total_count = len(df)
+        pass_rate = (pass_count / total_count * 100) if total_count > 0 else 0
+        
+        print(f"📊 Processing Complete:")
+        print(f"   📏 {total_count} measurements")
+        print(f"   🔧 {df[element_col].nunique()} elements")
+        print(f"   ✅ {pass_rate:.1f}% pass rate")
     
     return df, summary_df
 
 
-def export_to_excel(df: pd.DataFrame, filename: str = 'CMM_Analysis') -> str:
+def export_to_excel(df: pd.DataFrame, filename: str = 'CMM_Analysis', verbose: bool = False) -> str:
     """
     Export DataFrame to Excel with Japanese character support.
     
     Args:
         df: DataFrame to export
         filename: Base filename (without extension)
+        verbose: Whether to print progress messages (default: False)
         
     Returns:
         str: Generated filename
@@ -371,12 +613,13 @@ def export_to_excel(df: pd.DataFrame, filename: str = 'CMM_Analysis') -> str:
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     excel_filename = f"{filename}_{timestamp}.xlsx"
     df.to_excel(excel_filename, index=False)
-    print(f"✅ Exported: {excel_filename}")
+    if verbose:
+        print(f"✅ Exported: {excel_filename}")
     return excel_filename
 
 
 # Package metadata
-__version__ = "1.0.0"
+__version__ = "1.2.0"  # Updated version
 __author__ = "shuhei"
 __license__ = "MIT"
-__description__ = "Professional CMM measurement data parser for coordinate measuring machines"
+__description__ = "Professional CMM measurement data parser for coordinate measuring machines with filtered XY extraction"
